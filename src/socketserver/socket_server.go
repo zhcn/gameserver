@@ -128,11 +128,14 @@ func readLoop(connCtx *ConnContext) {
 					msg.conn = connCtx.conn
 					msg.data = append(msg.data, recvBuffer[headLen:headLen+dataLen]...)
 					connCtx.handleChan <- msg
-					var tmp []byte
-					tmp = append(tmp, recvBuffer[headLen+dataLen:]...)
-					recvBuffer = tmp
+					recvBuffer = append([]byte{}, recvBuffer[headLen+dataLen:]...)
 					status = READ_MSG_HEAD
-					needReadMore = true
+					fmt.Printf("recvBuffer : %v\n", recvBuffer)
+					if len(recvBuffer) > 0 {
+						needReadMore = false
+					} else {
+						needReadMore = true
+					}
 				} else {
 					needReadMore = true
 				}

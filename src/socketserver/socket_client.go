@@ -9,8 +9,9 @@ import (
 
 func sendData(conn *net.TCPConn, data []byte) {
 	buffer := []byte{0x66, 0x66, 0x00, 0x00, 0x00, 0x00}
-	binary.BigEndian.PutUint32(buffer[2:6], uint32(len(buffer)))
+	binary.BigEndian.PutUint32(buffer[2:6], uint32(len(data)))
 	buffer = append(buffer, data...)
+	fmt.Printf("client sendData : %v\n", buffer)
 	conn.Write(buffer)
 }
 
@@ -52,6 +53,7 @@ func initClient() {
 	for i = 0; i < 10; i++ {
 		data := bytes.NewBuffer([]byte{})
 		binary.Write(data, binary.BigEndian, i)
+		fmt.Printf("client send data : %v\n", data.Bytes())
 		writeChan <- data.Bytes()
 	}
 }

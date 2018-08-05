@@ -37,7 +37,8 @@ func client() {
 func TestStartServer(t *testing.T) {
 	go StartServer("127.0.0.1:12345")
 	RegisterHandler(testHandler)
-	client()
+	//client()
+	initClient()
 	var test chan int
 	<-test
 }
