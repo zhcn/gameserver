@@ -1,26 +1,34 @@
 package sockerserver
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
 	"net"
 )
 
-var handler func(net.Conn, []byte) []byte
+var handler func(Msg) Msg
 
 /*
  *  one conn will start 3 goroutine : readroutine writeroutine handleroutine
  */
 func StartServer(serverAddr string) bool {
-	tcpAddr, err := net.ResolveTCPAddr("ip4", serverAddr)
+	/*tcpAddr, err := net.ResolveIPAddr("ip4", serverAddr)
 	if err != nil {
+		fmt.Printf("%s %v\n", serverAddr, err)
 		return false
-	}
-	listener, err := net.ListenTCP("tcp", tcpAddr)
+	}*/
+	listener, err := net.Listen("tcp", serverAddr)
 	if err != nil {
+		fmt.Printf("%v", err)
 		return false
 	}
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			fmt.Printf("%v", err)
 			continue
 		}
 		go handleConn(conn)
@@ -32,18 +40,20 @@ type ConnContext struct {
 	conn       net.Conn
 	quitChan   chan int
 	handleChan chan Msg
-	writeChan  chan []byte
+	writeChan  chan Msg
 }
 
 func handleConn(conn net.Conn) {
-	loopers := []func(net.Conn){readLoop, writeLoop, handleLoop}
+	fmt.Printf("new conn\n")
+	loopers := []func(*ConnContext){readLoop, writeLoop, handleLoop}
 	connCtx := new(ConnContext)
-	connCtx.connClose = make(chan int, 1)
+	connCtx.conn = conn
+	connCtx.quitChan = make(chan int, 1)
 	connCtx.handleChan = make(chan Msg, 1000)
-	connCtx.writeChan = make(chan []byte)
+	connCtx.writeChan = make(chan Msg, 1000)
 	for _, l := range loopers {
 		looper := l
-		go looper(conn, connCtx)
+		go looper(connCtx)
 	}
 }
 
@@ -66,18 +76,19 @@ type Msg struct {
 	data []byte
 }
 
-func readLoop(connCtx *connContext) {
+func readLoop(connCtx *ConnContext) {
 	status := READ_MSG_HEAD
 	bufferReader := bufio.NewReader(connCtx.conn)
 	var recvBuffer []byte
+	tmpBuffer := make([]byte, 1024)
 	var dataLen uint32
+	needReadMore := false
 	for {
 		select {
 		case <-connCtx.quitChan:
 			return
 		default:
 		}
-		var tmpBuffer []byte
 		n, err := bufferReader.Read(tmpBuffer)
 		if err != nil {
 			if err == io.EOF {
@@ -86,62 +97,71 @@ func readLoop(connCtx *connContext) {
 			//todo : send this to other loop by channel
 			return
 		}
-		recvBuffer = append(recvBuffer, tmpBuffer...)
-		switch status {
-		case READ_MSG_HEAD:
-			if len(recvBuffer >= MSG_HEAD_BYTES) {
-				if recvBuffer[0] == 0x66 && recvBuffer[1] == 0x66 {
-					status = READ_DATA_LEN
+		recvBuffer = append(recvBuffer, tmpBuffer[:n]...)
+		needReadMore = false
+		for needReadMore == false {
+			fmt.Printf("status %v buffer %v buffer len %v\n", status, recvBuffer, len(recvBuffer))
+			switch status {
+			case READ_MSG_HEAD:
+				if len(recvBuffer) >= MSG_HEAD_BYTES {
+					if recvBuffer[0] == 0x66 && recvBuffer[1] == 0x66 {
+						status = READ_DATA_LEN
+					} else {
+						fmt.Printf("msg head is broken")
+						return
+					}
 				} else {
-					fmt.Printf("msg head is broken")
-					return
+					needReadMore = true
+				}
+			case READ_DATA_LEN:
+				if len(recvBuffer) >= MSG_HEAD_BYTES+DATA_LEN_BYTES {
+					bufReader := bytes.NewReader(recvBuffer[MSG_HEAD_BYTES : MSG_HEAD_BYTES+DATA_LEN_BYTES])
+					binary.Read(bufReader, binary.BigEndian, &dataLen)
+					status = READ_DATA
+				} else {
+					needReadMore = true
+				}
+			case READ_DATA:
+				if len(recvBuffer) >= int(MSG_HEAD_BYTES+DATA_LEN_BYTES+dataLen) {
+					headLen := uint32(MSG_HEAD_BYTES + DATA_LEN_BYTES)
+					var msg Msg
+					msg.conn = connCtx.conn
+					msg.data = append(msg.data, recvBuffer[headLen:headLen+dataLen]...)
+					connCtx.handleChan <- msg
+					var tmp []byte
+					tmp = append(tmp, recvBuffer[headLen+dataLen:]...)
+					recvBuffer = tmp
+					status = READ_MSG_HEAD
+					needReadMore = true
+				} else {
+					needReadMore = true
 				}
 			}
-			break
-		case READ_DATA_LEN:
-			if len(recvBuffer) >= MSG_HEAD_BYTES+DATA_LEN_BYTES {
-				binary.Read(recvBuffer[MSG_HEAD_BYTES:MSG_HEAD_BYTES+DATA_LEN_BYTES], binary.BigEndian, &dataLen)
-				status = READ_DATA
-			}
-			break
-		case READ_DATA:
-			if len(recvBuffer) >= MSG_HEAD_BYTES+DATA_LEN_BYTES+dataLen {
-				headLen := MSG_HEAD_BYTES + DATA_LEN_BYTES
-				var msg Msg
-				msg.conn = conn
-				msg.data = recvBuffer[headLen : headLen+dataLen]
-				connCtx.handleChan <- msg
-				var tmp []byte
-				tmp = append(tmp, recvBuffer[headLen+dataLen:]...)
-				recvBuffer = tmp
-				status = READ_MSG_HEAD
-			}
-			break
 		}
 	}
 }
-func writeLoop(connCtx *connContext) {
+func writeLoop(connCtx *ConnContext) {
 	for {
 		select {
 		case msg := <-connCtx.writeChan:
-			sendData := make([]byte, MSG_HEAD_BYTES+DATA_LEN_BYTES+len(msg))
+			sendData := make([]byte, MSG_HEAD_BYTES+DATA_LEN_BYTES+len(msg.data))
 			sendData = append(sendData, 0x66, 0x66)
 			dataLen := uint32(len(msg.data))
-			binary.Write(sendData[MSG_HEAD_BYTES:MSG_HEAD_BYTES+DATA_LEN_BYTES], binary.BigEndian, dataLen)
-			sendData = append(sendData, msg...)
+			binary.BigEndian.PutUint32(sendData[MSG_HEAD_BYTES:MSG_HEAD_BYTES+DATA_LEN_BYTES], dataLen)
+			sendData = append(sendData, msg.data...)
 			connCtx.conn.Write(sendData)
-		case connCtx.quitChan:
+		case <-connCtx.quitChan:
 			return
 		}
 	}
 
 }
-func handleData(connCtx *connContext) {
+func handleLoop(connCtx *ConnContext) {
 	for {
 		select {
 		case msg := <-connCtx.handleChan:
-			resultMsg := handler(connCtx.conn, msg)
-			if len(resultMsg) > 0 {
+			resultMsg := handler(msg)
+			if len(resultMsg.data) > 0 {
 				connCtx.writeChan <- resultMsg
 			}
 		case <-connCtx.quitChan:
@@ -149,6 +169,6 @@ func handleData(connCtx *connContext) {
 		}
 	}
 }
-func RegisterHandler(h func(net.Conn, []byte) []byte) {
+func RegisterHandler(h func(Msg) Msg) {
 	handler = h
 }
